@@ -49,10 +49,10 @@ for _ in {1..30}; do
 done
 [[ -n "$RESULT" ]] || { echo "Timed out waiting for $RESULT_PATH" >&2; exit 1; }
 
-printf '%s\n' "$RESULT" | python3 - "$JOB_ID" "$SESSION" <<'PY'
-import json,sys
+RESULT_JSON="$RESULT" python3 - "$JOB_ID" "$SESSION" <<'PY'
+import json,os,sys
 jid,session=sys.argv[1],sys.argv[2]
-d=json.load(sys.stdin)
+d=json.loads(os.environ['RESULT_JSON'])
 assert d.get('protocol') == 'CHATGPT_RELAY_V1', d
 assert d.get('relay_version') == '1.0.0', d
 assert d.get('job_id') == jid, d

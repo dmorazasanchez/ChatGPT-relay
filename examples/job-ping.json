@@ -1,0 +1,6 @@
+{
+  "protocol": "CHATGPT_RELAY_V1",
+  "session": "default",
+  "job_id": "ping-001",
+  "op": "ping"
+}

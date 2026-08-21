@@ -1,0 +1,9 @@
+{
+  "protocol": "CHATGPT_RELAY_V1",
+  "session": "default",
+  "job_id": "status-001",
+  "op": "shell",
+  "cwd": "/home/user/project",
+  "command": "git status --short --branch",
+  "timeout": 30
+}

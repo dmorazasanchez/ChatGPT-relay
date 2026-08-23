@@ -53,7 +53,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_ttl_accepts_fresh_and_rejects_expired(self):
         cfg = self.cfg("/tmp")
-        now = 2_000_000
+        now = int(time.time())
         job = self.fresh_job(created_unix=now - 10, ttl_seconds=30)
         common.validate_job(cfg, job, enforce_freshness=True)
         expired = dict(job, created_unix=now - 31)

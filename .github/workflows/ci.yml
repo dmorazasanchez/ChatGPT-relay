@@ -12,70 +12,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Python syntax
-        run: python3 -m py_compile relay.py
+
+      - name: Python syntax and imports
+        run: |
+          python3 -m compileall -q relay.py chatgpt_relay tests
+          python3 relay.py --help >/dev/null
+          python3 - <<'PY'
+          from chatgpt_relay import common, github, runner, server, state, transport, cli
+          assert common.VERSION == "1.1.0"
+          assert hasattr(server, "time")
+          PY
+
       - name: Bash syntax
         run: |
           bash -n install.sh
           bash -n self-test.sh
+
       - name: JSON examples
         run: |
           python3 -m json.tool examples/job-ping.json >/dev/null
           python3 -m json.tool examples/job-shell.json >/dev/null
-      - name: Core unit smoke tests
+
+      - name: Reliability test suite
+        run: python3 -m unittest -v tests/test_reliability.py
+
+      - name: Installed-layout smoke test
         run: |
-          python3 - <<'PY'
-          import importlib.util
-          import pathlib
-          import tempfile
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/app"
+          cp relay.py "$tmp/app/"
+          cp -a chatgpt_relay "$tmp/app/"
+          python3 "$tmp/app/relay.py" --help >/dev/null
+          python3 "$tmp/app/relay.py" --version 2>/dev/null && exit 1 || true
 
-          spec = importlib.util.spec_from_file_location('relay', 'relay.py')
-          relay = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(relay)
-
-          assert relay.normalize_id('abc-123_test.x', 'id') == 'abc-123_test.x'
-          try:
-              relay.normalize_id('../bad', 'id')
-          except ValueError:
-              pass
-          else:
-              raise AssertionError('unsafe ID accepted')
-
-          with tempfile.TemporaryDirectory() as root:
-              cfg = {
-                  'allowed_roots': [root],
-                  'sessions': ['default'],
-                  'max_timeout': 10,
-                  'shell': '/bin/bash',
-              }
-              sessions = relay.Sessions(cfg)
-              runner = relay.Runner(cfg, sessions)
-              result = runner.execute({
-                  'session': 'default',
-                  'job_id': 'ci-shell',
-                  'op': 'shell',
-                  'cwd': root,
-                  'command': 'printf hello',
-              })
-              assert result['exit_code'] == 0
-              assert result['stdout'] == 'hello'
-
-              target = pathlib.Path(root) / 'file.txt'
-              runner.execute({
-                  'session': 'default',
-                  'job_id': 'ci-write',
-                  'op': 'write_file',
-                  'path': str(target),
-                  'content': 'abc',
-              })
-              assert target.read_text() == 'abc'
-
-              try:
-                  relay.ensure_allowed('/etc/passwd', cfg, exists=True)
-              except PermissionError:
-                  pass
-              else:
-                  raise AssertionError('path escape accepted')
-          PY
       - name: Installer help smoke test
         run: bash install.sh --help >/dev/null

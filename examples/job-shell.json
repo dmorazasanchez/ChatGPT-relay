@@ -1,9 +1,12 @@
 {
+  "_template_note": "Replace created_unix with the latest relay/status/heartbeat.json unix value before submitting.",
   "protocol": "CHATGPT_RELAY_V1",
   "session": "default",
-  "job_id": "status-001",
+  "job_id": "build-001",
   "op": "shell",
+  "created_unix": 0,
+  "ttl_seconds": 1800,
   "cwd": "/home/user/project",
-  "command": "git status --short --branch",
-  "timeout": 30
+  "command": "git status --short --branch && make -j8",
+  "timeout": 900
 }

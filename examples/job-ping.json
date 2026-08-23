@@ -1,6 +1,9 @@
 {
+  "_template_note": "Replace created_unix with the latest relay/status/heartbeat.json unix value before submitting.",
   "protocol": "CHATGPT_RELAY_V1",
   "session": "default",
   "job_id": "ping-001",
-  "op": "ping"
+  "op": "ping",
+  "created_unix": 0,
+  "ttl_seconds": 900
 }

@@ -2,20 +2,20 @@
 
 A self-hosted GitHub-backed execution relay for ChatGPT.
 
-It lets a ChatGPT conversation submit bounded jobs to **your own Linux machine** by writing small JSON files to a GitHub repository you control. A daemon on the machine polls that queue, executes the job, and writes the result back to GitHub for ChatGPT to read.
+It lets a ChatGPT conversation submit bounded jobs to **your own Linux machine** by writing small JSON files to a GitHub repository you control. A daemon on the machine polls that queue, executes the job locally, and writes the result back to GitHub for ChatGPT to read.
 
 This is an **unofficial community project** and is not affiliated with OpenAI or GitHub.
 
-## What it looks like
+## Architecture
 
 ```text
 ChatGPT
    |
-   | GitHub app / write action
+   | GitHub write action
    v
 private queue repository
    |
-   | relay/jobs/default--123.json
+   | relay/jobs/<session>--<job>.json
    v
 chatgpt-relay daemon on your Linux machine
    |
@@ -23,38 +23,32 @@ chatgpt-relay daemon on your Linux machine
    v
 local workspace
    |
-   | relay/results/default--123.json
+   | relay/results/<session>--<job>.json
    v
 private queue repository -> ChatGPT
 ```
 
 No inbound port, public IP, SSH server, or webhook is required. The Linux host only needs outbound access to GitHub.
 
-## Important compatibility note
+## v1.1 reliability hardening
 
-ChatGPT must have a GitHub integration/experience that can **write repository contents**, not only search/read them. App capabilities and write-action availability can vary by ChatGPT plan, workspace, and configuration. If your ChatGPT GitHub connection is read-only, it can inspect relay state but cannot submit jobs.
+v1.1 adds the reliability layer needed for unattended use:
 
-## Features
-
-- GitHub file queue: no inbound network access required.
-- Dedicated private queue repository recommended.
-- No relay secret is stored in GitHub job history.
-- Fixed `status/queue.json` index so ChatGPT does not need directory/code-search discovery.
-- Durable local job ledger with conservative at-most-once recovery.
-- One running job per session; multiple sessions can run concurrently.
-- Process-group timeouts and cancellation.
-- Full stdout/stderr retained locally; compact output returned through GitHub.
-- Malformed JSON jobs are quarantined instead of blocking the queue.
-- Session controls: pause, resume, stop, notes and priority text.
-- Local-only HTTP health/API endpoint.
-- systemd user service + watchdog.
-- End-to-end GitHub round-trip self-test.
+- **Immutable queue blobs.** The relay executes the exact Git blob selected from the queue and will only delete the queue path if it still points to that same blob. An edited job is never silently consumed as if it were the original.
+- **Streaming stdout/stderr.** Shell output is streamed directly to local artifact files while only a bounded head/tail is kept in RAM and returned through GitHub.
+- **Artifact operations.** ChatGPT can use `artifact_info`, `artifact_read`, and `artifact_tail` to retrieve full local logs through another relay job.
+- **Job TTL.** GitHub jobs and controls carry `created_unix` and `ttl_seconds`, preventing old queued commands from unexpectedly executing after a machine reconnects.
+- **SQLite WAL ledger.** Durable at-most-once job state lives in `~/.local/share/chatgpt-relay/jobs.sqlite3`. Existing v1.0 JSON state is migrated automatically.
+- **Capabilities and schemas.** The relay publishes `capabilities.json`, `job.schema.json`, and `control.schema.json` in the status directory.
+- **Fault-oriented CI.** Tests cover large output, timeouts, path boundaries, SQLite recovery, legacy-state migration, TTL rejection, artifact access, and immutable-delete conflicts.
 
 ## Security model
 
-**A writer to the queue repository can execute commands as the Unix account running the relay.**
+**Write access to the queue repository is authorization to execute commands as the Unix account running the relay.**
 
-Use a dedicated **private** queue repository and grant write access only to identities/apps you trust. `allowed_roots` restricts built-in file operations and the working directory of shell jobs; it is **not a shell sandbox**. A shell command can still access anything the Unix user can access. See [SECURITY.md](SECURITY.md).
+Use a dedicated **private** queue repository and grant write access only to identities/apps you trust. `allowed_roots` constrains built-in file operations and the working directory of shell jobs; it is **not a shell sandbox**. See [SECURITY.md](SECURITY.md).
+
+Do not put passwords, API keys, private keys, or other long-lived secrets in job JSON or shell command strings: Git history is durable even after a queue file is deleted.
 
 ## Requirements
 
@@ -65,9 +59,9 @@ On the Linux host:
 - GitHub CLI (`gh`)
 - `systemd --user`
 - `bash`
-- `git` for the Git operations
+- `git` for Git operations
 
-Authenticate `gh` first:
+Authenticate first:
 
 ```bash
 gh auth login
@@ -75,17 +69,13 @@ gh auth login
 
 ## 1. Create a private queue repository
 
-Use a separate repository from this public source repo. For example:
-
 ```bash
 gh repo create my-chatgpt-relay-queue --private
 ```
 
-The queue repository contains commands and results, so private is strongly recommended.
+Keep the queue separate from your source repositories.
 
-## 2. Install the relay
-
-Choose the directories ChatGPT is allowed to work from:
+## 2. Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dmorazasanchez/ChatGPT-relay/main/install.sh | \
@@ -94,54 +84,48 @@ curl -fsSL https://raw.githubusercontent.com/dmorazasanchez/ChatGPT-relay/main/i
   --root "$HOME/projects"
 ```
 
-Multiple roots are supported:
+Multiple roots and independent concurrent sessions are supported:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dmorazasanchez/ChatGPT-relay/main/install.sh | \
   bash -s -- \
   --repo YOUR_GITHUB_USER/my-chatgpt-relay-queue \
   --root "$HOME/project-a" \
-  --root "$HOME/project-b"
+  --root "$HOME/project-b" \
+  --session code \
+  --session build
 ```
 
-For independent concurrent work lanes, add sessions:
+The installer downloads the modular app into:
 
-```bash
-... --session code --session research --session build
+```text
+~/.local/share/chatgpt-relay/app/
 ```
 
-If no session is supplied, the relay creates `default`.
+and creates the stable launcher:
 
-The installer:
+```text
+~/.local/bin/chatgpt-relay
+```
 
-1. validates GitHub access,
-2. installs `relay.py` to `~/.local/bin/chatgpt-relay`,
-3. writes `~/.config/chatgpt-relay/config.json`,
-4. creates the queue directories,
-5. installs a systemd user service and watchdog,
-6. verifies `/health`,
-7. verifies `status/queue.json`,
-8. submits a real GitHub `ping` job and validates the result.
+It then configures systemd, verifies health/capabilities, and submits a real GitHub round-trip ping.
 
-## 3. Connect GitHub to ChatGPT
+## 3. Connect ChatGPT
 
-Connect GitHub in ChatGPT and grant it access to the **private queue repository**. The exact UI and action availability can vary by plan/workspace.
+Connect GitHub in ChatGPT and grant the conversation/app access to the **private queue repository**. The GitHub integration must expose a repository **write action**, not only search/read.
 
-Then give ChatGPT the bootstrap instructions in [examples/CHATGPT_INSTRUCTIONS.md](examples/CHATGPT_INSTRUCTIONS.md). There is **no GitHub relay token to paste into ChatGPT**.
+Give ChatGPT the instructions in [examples/CHATGPT_INSTRUCTIONS.md](examples/CHATGPT_INSTRUCTIONS.md).
 
 A short bootstrap prompt is:
 
 ```text
 Use OWNER/QUEUE_REPO as my ChatGPT Relay queue.
 Protocol: CHATGPT_RELAY_V1.
-Read relay/status/hello.json and relay/status/queue.json first.
-Use the job/result protocol documented in examples/CHATGPT_INSTRUCTIONS.md from dmorazasanchez/ChatGPT-relay.
-Use only the configured sessions and allowed roots reported by hello.json.
+Read relay/status/hello.json, capabilities.json, heartbeat.json and queue.json first.
+Follow dmorazasanchez/ChatGPT-relay examples/CHATGPT_INSTRUCTIONS.md.
 ```
 
-## Queue protocol
-
-Default prefix: `relay/`
+## Queue layout
 
 ```text
 relay/
@@ -158,40 +142,35 @@ relay/
     heartbeat.json
     sessions.json
     queue.json
+    capabilities.json
+    job.schema.json
+    control.schema.json
 ```
 
-Example ping job:
+## Freshness / TTL
+
+By default, GitHub jobs and controls require:
 
 ```json
 {
-  "protocol": "CHATGPT_RELAY_V1",
-  "session": "default",
-  "job_id": "ping-001",
-  "op": "ping"
+  "created_unix": 1787520000,
+  "ttl_seconds": 3600
 }
 ```
 
-Create it as:
+**Do not copy that example timestamp literally.** ChatGPT should normally read `relay/status/heartbeat.json` and copy its current `unix` value into `created_unix` when creating a job. If the computer has been offline long enough that the heartbeat is stale, the resulting job expires instead of unexpectedly executing much later.
 
-```text
-relay/jobs/default--ping-001.json
-```
+Defaults:
 
-The result appears at exactly:
+- default TTL: 3600 seconds
+- maximum TTL: 86400 seconds
+- allowed future clock skew: 300 seconds
 
-```text
-relay/results/default--ping-001.json
-```
+Compatibility mode is available with installer option `--allow-untimestamped-jobs`, but the default is safer.
 
-Do not include `default--` inside `job_id`; the namespace belongs only in the filename.
+## Example shell job
 
-## Supported operations
-
-### `ping`
-
-Checks the round trip.
-
-### `shell`
+Assume the latest heartbeat contains `"unix": 1787520000`:
 
 ```json
 {
@@ -199,71 +178,94 @@ Checks the round trip.
   "session": "default",
   "job_id": "build-001",
   "op": "shell",
+  "created_unix": 1787520000,
+  "ttl_seconds": 3600,
   "cwd": "/home/user/project",
   "command": "git status --short && make -j8",
   "timeout": 900
 }
 ```
 
-### `read_file`
+Create it as:
 
-Reads a bounded line range from an allowed path.
+```text
+relay/jobs/default--build-001.json
+```
 
-### `write_file`
+The result appears at:
 
-Writes UTF-8 text to an allowed path.
+```text
+relay/results/default--build-001.json
+```
 
-### `list_files`
+Inside JSON, `job_id` stays unprefixed.
 
-Lists a bounded tree under an allowed directory.
+## Supported operations
 
-### `git_status`
+- `ping`
+- `shell`
+- `read_file`
+- `write_file`
+- `list_files`
+- `git_status`
+- `git_diff`
+- `cancel`
+- `control_status`
+- `artifact_info`
+- `artifact_read`
+- `artifact_tail`
 
-Runs `git status --short --branch`.
+The authoritative list is always the machine's `relay/status/capabilities.json`.
 
-### `git_diff`
+### Reading a large build log
 
-Returns a bounded git diff. Set `"cached": true` for staged changes.
+A shell result contains artifact references such as:
 
-### `cancel`
+```json
+{
+  "stdout_artifact_ref": {
+    "session": "default",
+    "job_id": "build-001",
+    "stream": "stdout"
+  }
+}
+```
 
-Sends SIGTERM to the process group of a running job.
-
-## Sessions and controls
-
-Each session serializes its own jobs. Different sessions can execute concurrently.
-
-Control actions are submitted to `relay/control/<session>--<id>.json`:
+Then submit, with a fresh timestamp:
 
 ```json
 {
   "protocol": "CHATGPT_RELAY_V1",
   "session": "default",
-  "action": "PAUSE"
+  "job_id": "tail-build-001",
+  "op": "artifact_tail",
+  "created_unix": 1787520000,
+  "ttl_seconds": 3600,
+  "target_session": "default",
+  "target_job_id": "build-001",
+  "stream": "stdout",
+  "lines": 200
 }
 ```
 
-Supported actions:
+`artifact_read` supports byte offsets for paging through a large file.
 
-- `PAUSE`
-- `RESUME`
-- `STOP` — also terminates the active job in that session
-- `NOTE`
-- `PRIORITY`
-- `CLEAR_PRIORITY`
+## Reliability semantics
 
-## Reliability model
+The relay favors conservative at-most-once execution:
 
-The relay keeps a local durable state for every job.
+1. Select the immutable Git blob SHA for a queue entry.
+2. Read and validate that exact blob.
+3. Record `running` in SQLite before command execution.
+4. Execute locally; shell stdout/stderr stream to artifacts.
+5. Persist the complete result as `done` in SQLite.
+6. Publish the result to GitHub and read it back for verification.
+7. Delete the job only if its current GitHub blob SHA still equals the selected SHA.
+8. Mark the local record `published`.
 
-- Before execution: state becomes `running`.
-- After execution: the full result is cached locally as `done`.
-- The result is written to GitHub and read back for verification.
-- Only after verification is the job file deleted.
-- A cached `done` result is republished after a transport/restart failure without rerunning the command.
-- If the relay restarts while a job was recorded as `running`, it returns `interrupted_previous_relay_instance` and **does not automatically rerun the command**.
+If publication fails after execution, the cached result is republished without rerunning the command. If the daemon restarts with a job recorded as `running`, it reports `interrupted_previous_relay_instance` and does **not** automatically repeat arbitrary side effects.
 
-This favors at-most-once behavior. True exactly-once execution is impossible for arbitrary shell side effects without cooperation from the command itself.
+True exactly-once execution is impossible for arbitrary shell commands without cooperation from the command itself.
 
 ## Health and logs
 
@@ -273,15 +275,19 @@ systemctl --user status chatgpt-relay.service
 journalctl --user -u chatgpt-relay.service -f
 ```
 
-Full command output is stored under:
+Artifacts:
 
 ```text
 ~/.local/share/chatgpt-relay/artifacts/
 ```
 
-The GitHub result contains the corresponding local artifact paths when output was truncated.
+SQLite ledger:
 
-Run the end-to-end test again at any time:
+```text
+~/.local/share/chatgpt-relay/jobs.sqlite3
+```
+
+Run the end-to-end test again:
 
 ```bash
 ~/.local/bin/chatgpt-relay-self-test default
@@ -289,18 +295,14 @@ Run the end-to-end test again at any time:
 
 ## Local HTTP API
 
-The HTTP API is bound to `127.0.0.1` by default and uses a separate token that never needs to go into GitHub.
+The HTTP API binds to `127.0.0.1` by default and uses a separate local token:
 
 ```bash
 TOKEN=$(chatgpt-relay show-local-token)
-curl \
-  -H "X-Relay-Token: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"session":"default","job_id":"local-ping","op":"ping"}' \
-  http://127.0.0.1:8765/
+curl -H "X-Relay-Token: $TOKEN" http://127.0.0.1:8765/capabilities
 ```
 
-Rotate that local-only token with:
+Rotate it with:
 
 ```bash
 chatgpt-relay rotate-local-token
@@ -315,15 +317,8 @@ rm -f ~/.config/systemd/user/chatgpt-relay.service
 rm -f ~/.config/systemd/user/chatgpt-relay-watchdog.service
 rm -f ~/.config/systemd/user/chatgpt-relay-watchdog.timer
 rm -f ~/.local/bin/chatgpt-relay ~/.local/bin/chatgpt-relay-self-test ~/.local/bin/chatgpt-relay-watchdog
+rm -rf ~/.local/share/chatgpt-relay/app
 systemctl --user daemon-reload
 ```
 
-Configuration/state are intentionally left behind. Remove them manually only if you no longer need them:
-
-```bash
-rm -rf ~/.config/chatgpt-relay ~/.local/share/chatgpt-relay
-```
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+Persistent state/artifacts are intentionally not removed by the uninstall commands above.

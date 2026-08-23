@@ -22,14 +22,17 @@ PREFIX="${META[1]}"
 JOB_ID="selftest-$(date +%s)-$RANDOM"
 JOB_PATH="$PREFIX/jobs/$SESSION--$JOB_ID.json"
 RESULT_PATH="$PREFIX/results/$SESSION--$JOB_ID.json"
+NOW=$(date +%s)
 
-PAYLOAD=$(python3 - "$SESSION" "$JOB_ID" <<'PY'
+PAYLOAD=$(python3 - "$SESSION" "$JOB_ID" "$NOW" <<'PY'
 import json,sys
 print(json.dumps({
   'protocol':'CHATGPT_RELAY_V1',
   'session':sys.argv[1],
   'job_id':sys.argv[2],
-  'op':'ping'
+  'op':'ping',
+  'created_unix':int(sys.argv[3]),
+  'ttl_seconds':300
 }, indent=2))
 PY
 )
@@ -54,10 +57,11 @@ import json,os,sys
 jid,session=sys.argv[1],sys.argv[2]
 d=json.loads(os.environ['RESULT_JSON'])
 assert d.get('protocol') == 'CHATGPT_RELAY_V1', d
-assert d.get('relay_version') == '1.0.0', d
+assert d.get('relay_version') == '1.1.0', d
 assert d.get('job_id') == jid, d
 assert d.get('session') == session, d
 assert d.get('status') == 'ok', d
+assert d.get('source_blob_sha'), d
 assert (d.get('result') or {}).get('pong') is True, d
 print(json.dumps(d, indent=2))
 PY

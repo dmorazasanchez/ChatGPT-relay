@@ -19,8 +19,11 @@ jobs:
           python3 relay.py --help >/dev/null
           python3 - <<'PY'
           from chatgpt_relay import common, github, runner, server, state, transport, cli
-          assert common.VERSION == "1.1.0"
+          assert common.VERSION == "1.2.0"
           assert hasattr(server, "time")
+          assert github.GH_READ_TIMEOUT <= 15
+          assert github.GH_WRITE_TIMEOUT <= 20
+          assert github.GH_RETRY_ATTEMPTS >= 5
           PY
 
       - name: Bash syntax

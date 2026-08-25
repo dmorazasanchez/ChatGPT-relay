@@ -4,6 +4,7 @@ import argparse
 import json
 import secrets
 import threading
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .runner import Runner, Sessions
 from .server import Handler
 from .state import db_connect, migrate_legacy_state
 from .transport import Transport
+
 
 def init_config(args):
     roots = [str(resolve_path(root)) for root in args.root]
@@ -74,7 +76,18 @@ def run_daemon():
     server.sessions = sessions
     server.transport = transport
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    transport.loop()
+
+    # Keep the daemon and localhost health endpoint alive even if GitHub is
+    # temporarily unreachable during protocol publication. Transport.loop()
+    # already absorbs normal poll failures; this catches startup/fatal transport
+    # failures and retries without making systemd flap the whole process.
+    while True:
+        try:
+            transport.loop()
+        except Exception as exc:
+            transport.api_error(exc)
+            print(f"GitHub transport degraded; retrying: {type(exc).__name__}: {exc}", flush=True)
+            time.sleep(min(15.0, max(1.0, float(cfg.get("poll_seconds", 3)))))
 
 
 def main():

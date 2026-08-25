@@ -211,7 +211,10 @@ WantedBy=timers.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now chatgpt-relay.service >/dev/null
+# Always restart the daemon after replacing its installed files. `enable --now`
+# alone is a no-op for an already-running service and can leave old code resident.
+systemctl --user enable chatgpt-relay.service >/dev/null
+systemctl --user restart chatgpt-relay.service
 systemctl --user enable --now chatgpt-relay-watchdog.timer >/dev/null
 
 healthy=0

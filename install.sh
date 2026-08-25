@@ -4,6 +4,7 @@ set -euo pipefail
 SOURCE_REPO="${CHATGPT_RELAY_SOURCE_REPO:-dmorazasanchez/ChatGPT-relay}"
 SOURCE_REF="${CHATGPT_RELAY_REF:-main}"
 SOURCE_BASE="https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_REF}"
+EXPECTED_VERSION="1.2.0"
 APP="chatgpt-relay"
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="$HOME/.config/$APP"
@@ -20,7 +21,7 @@ WATCHDOG_TIMER="$UNIT_DIR/$APP-watchdog.timer"
 
 usage() {
   cat <<'EOF'
-Install ChatGPT Relay v1.1 on a Linux host.
+Install ChatGPT Relay v1.2 on a Linux host.
 
 Usage:
   install.sh --repo OWNER/PRIVATE_QUEUE_REPO --root /workspace [--root /other] [options]
@@ -216,7 +217,7 @@ systemctl --user enable --now chatgpt-relay-watchdog.timer >/dev/null
 healthy=0
 for _ in {1..30}; do
   if curl -fsS "http://127.0.0.1:${HTTP_PORT}/health" \
-      | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("ok") and d.get("relay_version")=="1.1.0" else 1)' \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get('ok') and d.get('relay_version')=='$EXPECTED_VERSION' else 1)" \
       >/dev/null 2>&1; then
     healthy=1
     break
@@ -232,21 +233,21 @@ fi
 manifest_ok=0
 for _ in {1..20}; do
   if gh api "repos/$REPO/contents/$QUEUE_PREFIX/status/capabilities.json" -H 'Accept: application/vnd.github.raw' 2>/dev/null \
-      | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("relay_version")=="1.1.0" and d.get("reliability",{}).get("immutable_queue_blobs") else 1)' \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); r=d.get('reliability',{}); raise SystemExit(0 if d.get('relay_version')=='$EXPECTED_VERSION' and r.get('immutable_queue_blobs') and r.get('serialized_github_mutations') else 1)" \
       >/dev/null 2>&1; then
     manifest_ok=1
     break
   fi
   sleep 1
 done
-[[ "$manifest_ok" == 1 ]] || { echo "Relay is healthy but v1.1 capabilities were not published." >&2; exit 1; }
+[[ "$manifest_ok" == 1 ]] || { echo "Relay is healthy but v1.2 capabilities were not published." >&2; exit 1; }
 
 if [[ "$SKIP_SELF_TEST" == 0 ]]; then "$SELFTEST" "${SESSIONS[0]}"; fi
 
 LOCAL_TOKEN=$($BIN show-local-token)
 cat <<EOF
 
-ChatGPT Relay v1.1 is installed and healthy.
+ChatGPT Relay v1.2 is installed and healthy.
 
 Queue repo:   $REPO
 Queue prefix: $QUEUE_PREFIX

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import signal
@@ -157,14 +158,14 @@ class Sessions:
             elif action == "RESUME": item["mode"] = "running"
             elif action == "STOP": item["mode"] = "stopped"
             elif action == "NOTE":
-                if not text.strip(): raise ValueError(["NOTE requires text"][0])
+                if not text.strip(): raise ValueError("NOTE requires text")
             elif action == "PRIORITY":
-                if not text.strip(): raise ValueError(["PRIORITY requires text"][0])
+                if not text.strip(): raise ValueError("PRIORITY requires text")
                 item["priority"] = text.strip()
             elif action == "CLEAR_PRIORITY": item["priority"] = ""
             else: raise ValueError(f"unsupported control action {action!r}")
             message = {
-                "id": f"{session}-{ent(time.time())}-{os.urandom(3).hex()}" if False else f"{session}-{now}-{os.urandom(3).hex()}", "action": action,
+                "id": f"{session}-{now}-{os.urandom(3).hex()}", "action": action,
                 "text": text.strip(), "source": source, "unix": now,
             }
             item["messages"].append(message)
@@ -188,19 +189,30 @@ class Runner:
                 "key": key, "job_id": info["job_id"], "session": info["session"],
                 "started_unix": info["unix"], "elapsed_s": round(now - info["mono"], 1),
                 "command": info.get("command", "")[:180],
+                "source_blob_sha": info.get("source_blob_sha"),
                 "stdout_bytes": info.get("stdout_capture").size() if info.get("stdout_capture") else None,
                 "stderr_bytes": info.get("stderr_capture").size() if info.get("stderr_capture") else None,
             } for key, info in self.active.items()]
 
-    def cancel(self, session: str, job_id: str):
+    def cancel(self, session: str, job_id: str, expected_source_blob_sha: str | None = None):
         key = f"{session}--{job_id}"
         with self.lock:
             info = self.active.get(key)
         if not info:
             return {"cancelled": False, "reason": "not-running"}
+        active_sha = str(info.get("source_blob_sha") or "")
+        if expected_source_blob_sha and active_sha != expected_source_blob_sha:
+            return {
+                "cancelled": False, "reason": "source-blob-mismatch", "session": session, "job_id": job_id,
+                "expected_source_blob_sha": expected_source_blob_sha,
+                "active_source_blob_sha": active_sha or None,
+            }
         try:
             os.killpg(info["process"].pid, signal.SIGTERM)
-            return {"cancelled": True, "session": session, "job_id": job_id}
+            return {
+                "cancelled": True, "session": session, "job_id": job_id,
+                "source_blob_sha": active_sha or None,
+            }
         except Exception as exc:
             return {"cancelled": False, "reason": str(exc)}
 
@@ -226,7 +238,13 @@ class Runner:
         session = common.normalize_session(self.cfg, job.get("session"))
         job_id = common.normalize_job_id(session, job.get("job_id"))
         cwd = common.ensure_allowed(str(job["cwd"]), self.cfg, exists=True, directory=True)
-        command = str(job["command"])
+        if job.get("command_b64"):
+            try:
+                command = base64.b64decode(str(job["command_b64"]).encode(), validate=True).decode("utf-8")
+            except Exception as exc:
+                raise ValueError(f"invalid command_b64: {exc}") from exc
+        else:
+            command = str(job["command"])
         timeout = max(1, min(int(job.get("timeout", 120)), int(self.cfg.get("max_timeout", 1800))))
         env = os.environ.copy()
         env.update({str(k): str(v) for k, v in (job.get("env") or {}).items()})
@@ -247,6 +265,7 @@ class Runner:
             self.active[key] = {
                 "process": proc, "session": session, "job_id": job_id, "mono": started,
                 "unix": int(time.time()), "command": command,
+                "source_blob_sha": str(job.get("_source_blob_sha") or "") or None,
                 "stdout_capture": stdout_capture, "stderr_capture": stderr_capture,
             }
         timed_out = False
@@ -285,7 +304,8 @@ class Runner:
         if op == "cancel":
             target_session = common.normalize_session(self.cfg, job.get("target_session") or session)
             target_job = common.normalize_job_id(target_session, job.get("target_job_id"))
-            return self.cancel(target_session, target_job)
+            expected_sha = str(job.get("target_source_blob_sha") or "") or None
+            return self.cancel(target_session, target_job, expected_sha)
         if op == "control_status": return self.sessions.snap(session)
         if op == "read_file":
             path = common.ensure_allowed(str(job["path"]), self.cfg, exists=True)

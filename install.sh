@@ -3,7 +3,8 @@ set -euo pipefail
 
 SOURCE_REPO="${CHATGPT_RELAY_SOURCE_REPO:-dmorazasanchez/ChatGPT-relay}"
 SOURCE_REF="${CHATGPT_RELAY_REF:-main}"
-SOURCE_BASE="https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_REF}"
+SOURCE_COMMIT=""
+SOURCE_BASE=""
 EXPECTED_VERSION="1.2.2"
 APP="chatgpt-relay"
 BIN_DIR="$HOME/.local/bin"
@@ -89,6 +90,20 @@ for cmd in python3 curl gh systemctl base64; do
 done
 gh auth status >/dev/null 2>&1 || { echo "Authenticate GitHub first: gh auth login" >&2; exit 1; }
 gh api "repos/$REPO" >/dev/null || { echo "Cannot access queue repository: $REPO" >&2; exit 1; }
+
+# Resolve a moving branch/tag exactly once. Every installed file must come from the
+# same immutable Git commit; otherwise rapid updates/CDN cache skew can produce a
+# mixed installation (for example common.py from a new revision with transport.py
+# from the previous one).
+SOURCE_COMMIT=$(gh api "repos/$SOURCE_REPO/commits/$SOURCE_REF" --jq .sha 2>/dev/null) || {
+  echo "Cannot resolve relay source ref: $SOURCE_REPO@$SOURCE_REF" >&2
+  exit 1
+}
+[[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "Resolved relay source is not a Git commit SHA: $SOURCE_COMMIT" >&2
+  exit 1
+}
+SOURCE_BASE="https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_COMMIT}"
 
 mkdir -p "$BIN_DIR" "$CFG_DIR" "$DATA_DIR" "$APP_DIR" "$PKG_DIR" "$UNIT_DIR"
 TMP_DIR=$(mktemp -d)
@@ -252,6 +267,7 @@ cat <<EOF
 
 ChatGPT Relay v1.2 is installed and healthy.
 
+Source commit: $SOURCE_COMMIT
 Queue repo:   $REPO
 Queue prefix: $QUEUE_PREFIX
 Sessions:     ${SESSIONS[*]}

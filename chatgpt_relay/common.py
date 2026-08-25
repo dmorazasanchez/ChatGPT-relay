@@ -13,7 +13,7 @@ from typing import Any
 
 APP = "chatgpt-relay"
 PROTOCOL = "CHATGPT_RELAY_V1"
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 HOME = Path.home()
 CFG_PATH = HOME / ".config" / APP / "config.json"
 DATA_DIR = HOME / ".local" / "share" / APP

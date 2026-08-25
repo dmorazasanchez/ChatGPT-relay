@@ -57,7 +57,7 @@ import json,os,sys
 jid,session=sys.argv[1],sys.argv[2]
 d=json.loads(os.environ['RESULT_JSON'])
 assert d.get('protocol') == 'CHATGPT_RELAY_V1', d
-assert d.get('relay_version') == '1.2.0', d
+assert d.get('relay_version') == '1.2.1', d
 assert d.get('job_id') == jid, d
 assert d.get('session') == session, d
 assert d.get('status') == 'ok', d

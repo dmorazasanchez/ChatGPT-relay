@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tempfile
@@ -39,11 +40,15 @@ class ReliabilityTests(unittest.TestCase):
         return job
 
     def test_version_and_capabilities(self):
-        self.assertEqual(common.VERSION, "1.1.0")
+        self.assertEqual(common.VERSION, "1.2.0")
         caps = common.capabilities(self.cfg("/tmp"))
         self.assertTrue(caps["reliability"]["immutable_queue_blobs"])
         self.assertTrue(caps["reliability"]["streaming_stdout_stderr"])
         self.assertEqual(caps["reliability"]["durable_state"], "sqlite-wal")
+        self.assertTrue(caps["reliability"]["serialized_github_mutations"])
+        self.assertTrue(caps["reliability"]["github_retry_backoff"])
+        self.assertTrue(caps["reliability"]["job_scoped_cancel"])
+        self.assertTrue(caps["reliability"]["shell_command_b64"])
         self.assertIn("artifact_tail", caps["operations"])
 
     def test_safe_ids(self):
@@ -89,6 +94,62 @@ class ReliabilityTests(unittest.TestCase):
                 self.assertLess(len(result["stdout"]), 10000)
                 self.assertEqual(Path(result["stdout_artifact"]).stat().st_size, 200000)
                 self.assertEqual(Path(result["stderr_artifact"]).stat().st_size, 150000)
+
+    def test_shell_command_b64_preserves_backslashes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = self.cfg(root)
+            sessions = runner_mod.Sessions(cfg)
+            runr = runner_mod.Runner(cfg, sessions)
+            command = "printf '%s\\n' 'a\\b'"
+            encoded = base64.b64encode(command.encode()).decode()
+            job = self.fresh_job(
+                job_id="b64-shell", op="shell", cwd=str(root), command_b64=encoded, timeout=5
+            )
+            common.validate_job(cfg, job)
+            with mock.patch.object(runner_mod, "ARTIFACT_DIR", root / "artifacts"):
+                result = runr.execute(job)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["stdout"], "a\\b\n")
+
+    def test_shell_requires_exactly_one_command_encoding(self):
+        cfg = self.cfg("/tmp")
+        base = self.fresh_job(op="shell", cwd="/tmp")
+        with self.assertRaises(ValueError):
+            common.validate_job(cfg, base)
+        with self.assertRaises(ValueError):
+            common.validate_job(cfg, dict(base, command="true", command_b64="dHJ1ZQ=="))
+        common.validate_job(cfg, dict(base, command="true"))
+        common.validate_job(cfg, dict(base, command_b64="dHJ1ZQ=="))
+
+    def test_job_scoped_cancel_refuses_wrong_source_blob(self):
+        cfg = self.cfg("/tmp")
+        sessions = runner_mod.Sessions(cfg)
+        runr = runner_mod.Runner(cfg, sessions)
+        proc = type("P", (), {"pid": 4242})()
+        runr.active["default--build-7"] = {
+            "process": proc,
+            "session": "default",
+            "job_id": "build-7",
+            "source_blob_sha": "a" * 40,
+        }
+        with mock.patch.object(runner_mod.os, "killpg") as killpg:
+            refused = runr.cancel("default", "build-7", "b" * 40)
+            self.assertFalse(refused["cancelled"])
+            self.assertEqual(refused["reason"], "source-blob-mismatch")
+            killpg.assert_not_called()
+            accepted = runr.cancel("default", "build-7", "a" * 40)
+            self.assertTrue(accepted["cancelled"])
+            killpg.assert_called_once_with(4242, runner_mod.signal.SIGTERM)
+
+    def test_cancel_validation_accepts_optional_blob_sha(self):
+        cfg = self.cfg("/tmp")
+        job = self.fresh_job(
+            job_id="cancel-1", op="cancel", target_job_id="build-7", target_source_blob_sha="a" * 40
+        )
+        common.validate_job(cfg, job)
+        with self.assertRaises(ValueError):
+            common.validate_job(cfg, dict(job, target_source_blob_sha="not-a-sha"))
 
     def test_artifact_read_and_tail(self):
         with tempfile.TemporaryDirectory() as td:
@@ -169,10 +230,17 @@ class ReliabilityTests(unittest.TestCase):
             args = run_mock.call_args.args[0]
             self.assertIn("sha=same-sha", args)
 
+    def test_github_writes_use_hardened_limits(self):
+        self.assertEqual(github_mod.GH_READ_TIMEOUT, 12)
+        self.assertEqual(github_mod.GH_WRITE_TIMEOUT, 15)
+        self.assertGreaterEqual(github_mod.GH_RETRY_ATTEMPTS, 5)
+
     def test_job_schema_requires_timestamp_by_default(self):
         schema = common.job_schema(self.cfg("/tmp"))
         self.assertIn("created_unix", schema["required"])
         self.assertIn("artifact_read", schema["properties"]["op"]["enum"])
+        self.assertIn("command_b64", schema["properties"])
+        self.assertIn("target_source_blob_sha", schema["properties"])
 
     def test_path_boundary(self):
         with tempfile.TemporaryDirectory() as td:

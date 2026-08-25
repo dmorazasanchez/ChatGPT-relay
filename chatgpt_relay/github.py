@@ -3,9 +3,19 @@ from __future__ import annotations
 import base64
 import json
 import subprocess
+import threading
 from typing import Any
 
 from .common import QueueMutationConflict, retry, run
+
+GH_READ_TIMEOUT = 12
+GH_WRITE_TIMEOUT = 15
+GH_RETRY_ATTEMPTS = 5
+
+# GitHub's Contents API creates commits on a shared branch. Serialize this
+# process's writes so worker/status/control threads do not race each other.
+# External writers are handled by bounded retry/backoff.
+_MUTATION_LOCK = threading.RLock()
 
 
 def _gh_error(proc: subprocess.CompletedProcess[str], what: str):
@@ -14,7 +24,7 @@ def _gh_error(proc: subprocess.CompletedProcess[str], what: str):
 
 
 def gh_get_meta(repo: str, path: str) -> dict | None:
-    proc = run(["gh", "api", f"repos/{repo}/contents/{path}"], timeout=30)
+    proc = run(["gh", "api", f"repos/{repo}/contents/{path}"], timeout=GH_READ_TIMEOUT)
     if proc.returncode == 0:
         obj = json.loads(proc.stdout)
         return obj if isinstance(obj, dict) else None
@@ -27,7 +37,7 @@ def gh_get_meta(repo: str, path: str) -> dict | None:
 def gh_get_text(repo: str, path: str) -> str | None:
     proc = run(
         ["gh", "api", f"repos/{repo}/contents/{path}", "-H", "Accept: application/vnd.github.raw"],
-        timeout=30,
+        timeout=GH_READ_TIMEOUT,
     )
     if proc.returncode == 0:
         return proc.stdout
@@ -38,7 +48,7 @@ def gh_get_text(repo: str, path: str) -> str | None:
 
 
 def gh_get_blob_text(repo: str, blob_sha: str, max_bytes: int = 2_000_000) -> str:
-    proc = run(["gh", "api", f"repos/{repo}/git/blobs/{blob_sha}"], timeout=30)
+    proc = run(["gh", "api", f"repos/{repo}/git/blobs/{blob_sha}"], timeout=GH_READ_TIMEOUT)
     if proc.returncode != 0:
         _gh_error(proc, f"GitHub GET blob {blob_sha}")
     obj = json.loads(proc.stdout)
@@ -56,7 +66,7 @@ def gh_get_blob_text(repo: str, blob_sha: str, max_bytes: int = 2_000_000) -> st
 
 
 def gh_list(repo: str, path: str) -> list[dict]:
-    proc = run(["gh", "api", f"repos/{repo}/contents/{path}?per_page=100"], timeout=30)
+    proc = run(["gh", "api", f"repos/{repo}/contents/{path}?per_page=100"], timeout=GH_READ_TIMEOUT)
     if proc.returncode != 0:
         _gh_error(proc, f"GitHub LIST {path}")
     obj = json.loads(proc.stdout)
@@ -77,12 +87,13 @@ def gh_put(repo: str, path: str, obj: Any, message: str):
         ]
         if meta and meta.get("sha"):
             args += ["-f", f"sha={meta['sha']}"]
-        proc = run(args, timeout=45)
+        proc = run(args, timeout=GH_WRITE_TIMEOUT)
         if proc.returncode != 0:
             _gh_error(proc, f"GitHub PUT {path}")
         return True
 
-    return retry(once)
+    with _MUTATION_LOCK:
+        return retry(once, attempts=GH_RETRY_ATTEMPTS, base_delay=0.5)
 
 
 def gh_delete_immutable(repo: str, path: str, expected_sha: str, message: str):
@@ -104,14 +115,13 @@ def gh_delete_immutable(repo: str, path: str, expected_sha: str, message: str):
                 "gh", "api", "--method", "DELETE", f"repos/{repo}/contents/{path}",
                 "-f", f"message={message}", "-f", f"sha={expected_sha}",
             ],
-            timeout=45,
+            timeout=GH_WRITE_TIMEOUT,
         )
         if proc.returncode == 0:
             return True
         text = proc.stderr or proc.stdout or ""
         if "HTTP 404" in text or "Not Found" in text:
             return True
-        # A concurrent edit may surface as a 409/422. Re-read before retrying.
         meta2 = gh_get_meta(repo, path)
         if meta2 is None:
             return True
@@ -122,4 +132,5 @@ def gh_delete_immutable(repo: str, path: str, expected_sha: str, message: str):
             )
         _gh_error(proc, f"GitHub DELETE {path}")
 
-    return retry(once)
+    with _MUTATION_LOCK:
+        return retry(once, attempts=GH_RETRY_ATTEMPTS, base_delay=0.5)

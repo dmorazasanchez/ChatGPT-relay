@@ -30,6 +30,9 @@ Operating rules:
 18. If a result says interrupted_previous_relay_instance, do not automatically resubmit a side-effecting command. Inspect state first.
 19. If a result/status reports a queue mutation conflict, re-read the queue path before doing anything else. The relay intentionally refuses to delete a queue file that changed after selection.
 20. Treat relay/status/job.schema.json and control.schema.json as authoritative protocol schemas.
+21. For complex, multiline, regex-heavy, sed/awk, or backslash-heavy shell commands, prefer command_b64 instead of command. Base64-encode the exact UTF-8 shell script and put only that base64 text in command_b64. Never set both command and command_b64.
+22. To stop one running job, submit the cancel job operation targeting its exact target_job_id. Do NOT use the session STOP control to cancel an ordinary job. STOP is an emergency session-wide action and may terminate whatever job is active in that session when the control is processed.
+23. If the active-job status exposes source_blob_sha, a cancel job may also include target_source_blob_sha. If supplied, the relay refuses cancellation when that immutable blob is not the active execution.
 
 Example ping (replace 1787520000 with the latest heartbeat unix):
 {
@@ -41,7 +44,7 @@ Example ping (replace 1787520000 with the latest heartbeat unix):
   "ttl_seconds": 900
 }
 
-Example shell:
+Example simple shell:
 {
   "protocol": "CHATGPT_RELAY_V1",
   "session": "default",
@@ -51,6 +54,19 @@ Example shell:
   "ttl_seconds": 1800,
   "cwd": "/home/user/project",
   "command": "git status --short --branch",
+  "timeout": 30
+}
+
+Example complex shell using command_b64. Here command_b64 is the base64 encoding of the exact UTF-8 shell script to execute:
+{
+  "protocol": "CHATGPT_RELAY_V1",
+  "session": "default",
+  "job_id": "complex-001",
+  "op": "shell",
+  "created_unix": 1787520000,
+  "ttl_seconds": 1800,
+  "cwd": "/home/user/project",
+  "command_b64": "cHJpbnRmICclc1xuJyAnaGVsbG8n",
   "timeout": 30
 }
 
@@ -96,7 +112,7 @@ Read a page of a large artifact:
   "max_bytes": 65536
 }
 
-Cancel a running job:
+Cancel a running job without changing the session state:
 {
   "protocol": "CHATGPT_RELAY_V1",
   "session": "default",
@@ -121,6 +137,10 @@ Session pause control goes in relay/control/default--pause-001.json:
 ## Why the heartbeat timestamp matters
 
 If the computer is offline, `heartbeat.json` stops advancing. A job created from that stale heartbeat will eventually fail TTL validation when the machine reconnects. This prevents an old command from unexpectedly running hours or days later.
+
+## v1.2 reliability notes
+
+The relay serializes its own GitHub Contents API mutations and uses bounded retry/backoff for branch-head races caused by external writers. GitHub transport failures do not need to kill the localhost daemon. Complex shell scripts should use `command_b64`; ordinary per-job interruption should use the `cancel` job operation, not session STOP.
 
 ## ChatGPT/GitHub requirement
 

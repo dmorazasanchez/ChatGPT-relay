@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -11,7 +13,7 @@ from typing import Any
 
 APP = "chatgpt-relay"
 PROTOCOL = "CHATGPT_RELAY_V1"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 HOME = Path.home()
 CFG_PATH = HOME / ".config" / APP / "config.json"
 DATA_DIR = HOME / ".local" / "share" / APP
@@ -36,6 +38,25 @@ class QueueMutationConflict(RuntimeError):
 
 class JobExpiredError(ValueError):
     pass
+
+
+def decode_transport_payload(raw: str) -> tuple[dict, str]:
+    """Decode queue/control payload from JSON or a whole-payload base64 envelope."""
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError as json_exc:
+        compact = "".join(raw.split())
+        try:
+            decoded = base64.b64decode(compact.encode("ascii"), validate=True).decode("utf-8")
+            obj = json.loads(decoded)
+        except (UnicodeEncodeError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+            raise json_exc
+        encoding = "base64-json"
+    else:
+        encoding = "json"
+    if not isinstance(obj, dict):
+        raise ValueError("transport payload must decode to a JSON object")
+    return obj, encoding
 
 
 def read_json(path: Path, default=None):
@@ -293,13 +314,13 @@ def control_schema(cfg: dict | None = None) -> dict:
 def capabilities(cfg: dict) -> dict:
     return {
         "protocol": PROTOCOL, "relay_version": VERSION, "operations": list(SUPPORTED_OPS),
-        "artifact_streams": list(ARTIFACT_STREAMS), "sessions": sessions_from_cfg(cfg),
+        "artifact_streams": list(ARTIFACT_STREAMS), "queue_payload_encodings": ["json", "base64-json"], "sessions": sessions_from_cfg(cfg),
         "allowed_roots": cfg.get("allowed_roots", []),
         "reliability": {
             "immutable_queue_blobs": True, "durable_state": "sqlite-wal", "at_most_once_recovery": True,
             "streaming_stdout_stderr": True, "malformed_job_quarantine": True,
             "serialized_github_mutations": True, "github_retry_backoff": True,
-            "job_scoped_cancel": True, "shell_command_b64": True,
+            "job_scoped_cancel": True, "shell_command_b64": True, "base64_json_envelope": True,
         },
         "freshness": ttl_policy(cfg),
         "limits": {

@@ -19,6 +19,7 @@ from .common import (
     normalize_session,
     sessions_from_cfg,
     validate_control,
+    decode_transport_payload,
     validate_freshness,
     validate_job,
 )
@@ -262,7 +263,7 @@ class Transport:
         result = None
         history_status = "transport-error"
         try:
-            job = json.loads(raw)
+            job, payload_encoding = decode_transport_payload(raw)
             if job.get("protocol") != PROTOCOL:
                 raise ValueError(f"wrong protocol; expected {PROTOCOL}")
             session = normalize_session(self.cfg, job.get("session") or session)
@@ -324,6 +325,7 @@ class Transport:
 
             allowed, reason = self.sessions.allowed(session)
             result = self._result_base(session, job_id, selected_sha)
+            result["source_payload_encoding"] = payload_encoding
             if not allowed:
                 result.update(status="blocked", error=reason, result={})
             else:
@@ -504,7 +506,7 @@ class Transport:
                 if not selected_sha:
                     raise ValueError("control entry missing blob SHA")
                 raw = gh_get_blob_text(self.repo, selected_sha, max_job_bytes)
-                control = json.loads(raw)
+                control, _payload_encoding = decode_transport_payload(raw)
                 session = validate_control(self.cfg, control, enforce_freshness=True)
                 action = str(control.get("action") or "").upper()
                 message = self.sessions.apply(session, action, str(control.get("text") or ""))

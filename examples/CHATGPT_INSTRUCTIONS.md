@@ -30,6 +30,8 @@ Operating rules:
 18. If a result says interrupted_previous_relay_instance, do not automatically resubmit a side-effecting command. Inspect state first.
 19. If a result/status reports a queue mutation conflict, re-read the queue path before doing anything else. The relay intentionally refuses to delete a queue file that changed after selection.
 20. Treat relay/status/job.schema.json and control.schema.json as authoritative protocol schemas.
+21. For shell jobs, write_file jobs, or controls with multiline/backslash/control-character-heavy content, prefer the whole-payload `base64-json` envelope advertised by capabilities.json. Serialize the complete job/control object with a JSON library, UTF-8 encode it, base64 encode those bytes, and put only that base64 text in the queue file. This avoids all GitHub/JSON escaping ambiguity.
+22. `command_b64` protects the shell command field; the whole-payload `base64-json` envelope protects the entire queue file. They may be used together.
 21. For complex, multiline, regex-heavy, sed/awk, or backslash-heavy shell commands, prefer command_b64 instead of command. Base64-encode the exact UTF-8 shell script and put only that base64 text in command_b64. Never set both command and command_b64.
 22. To stop one running job, submit the cancel job operation targeting its exact target_job_id. Do NOT use the session STOP control to cancel an ordinary job. STOP is an emergency session-wide action and may terminate whatever job is active in that session when the control is processed.
 23. If the active-job status exposes source_blob_sha, a cancel job may also include target_source_blob_sha. If supplied, the relay refuses cancellation when that immutable blob is not the active execution.

@@ -1,4 +1,5 @@
 import base64
+import base64
 import json
 import os
 import tempfile
@@ -39,8 +40,29 @@ class ReliabilityTests(unittest.TestCase):
         job.update(extra)
         return job
 
+    def test_transport_payload_accepts_json_and_base64_envelope(self):
+        payload = self.fresh_job(
+            op="shell",
+            cwd="/tmp",
+            command="printf 'a\\\\nb\\\\t[c]'",
+        )
+        raw = json.dumps(payload)
+        obj, encoding = common.decode_transport_payload(raw)
+        self.assertEqual(encoding, "json")
+        self.assertEqual(obj["command"], payload["command"])
+
+        envelope = base64.b64encode(raw.encode("utf-8")).decode("ascii")
+        obj2, encoding2 = common.decode_transport_payload(envelope)
+        self.assertEqual(encoding2, "base64-json")
+        self.assertEqual(obj2, payload)
+
+    def test_transport_payload_invalid_still_rejected(self):
+        bad = '{"protocol":"CHATGPT_RELAY_V1","command":"literal' + chr(10) + 'newline"}'
+        with self.assertRaises(json.JSONDecodeError):
+            common.decode_transport_payload(bad)
+
     def test_version_and_capabilities(self):
-        self.assertEqual(common.VERSION, "1.2.0")
+        self.assertEqual(common.VERSION, "1.2.1")
         caps = common.capabilities(self.cfg("/tmp"))
         self.assertTrue(caps["reliability"]["immutable_queue_blobs"])
         self.assertTrue(caps["reliability"]["streaming_stdout_stderr"])

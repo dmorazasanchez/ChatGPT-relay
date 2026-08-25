@@ -235,13 +235,10 @@ def validate_control(cfg: dict, control: dict, *, enforce_freshness=True) -> str
         raise ValueError(f"wrong protocol; expected {PROTOCOL}")
     session = normalize_session(cfg, control.get("session"))
     action = str(control.get("action") or "").upper()
-    if action not in {"PAUSE", "RESUME", "STOP", "CANCEL_JOB", "NOTE", "PRIORITY", "CLEAR_PRIORITY"}:
+    if action not in {"PAUSE", "RESUME", "STOP", "NOTE", "PRIORITY", "CLEAR_PRIORITY"}:
         raise ValueError(f"unsupported control action {action!r}")
     if action in {"NOTE", "PRIORITY"} and not str(control.get("text") or "").strip():
         raise ValueError(f"{action} requires text")
-    if action == "CANCEL_JOB":
-        normalize_job_id(session, control.get("target_job_id"))
-        _validate_optional_blob_sha(control.get("target_source_blob_sha"), "target_source_blob_sha")
     if enforce_freshness:
         validate_freshness(cfg, control, kind="control")
     return session
@@ -285,11 +282,8 @@ def control_schema(cfg: dict | None = None) -> dict:
         "required": ["protocol", "session", "action"] + (["created_unix"] if policy["required_timestamp"] else []),
         "properties": {
             "protocol": {"const": PROTOCOL}, "session": {"type": "string", "pattern": SAFE_ID.pattern},
-            "action": {"enum": ["PAUSE", "RESUME", "STOP", "CANCEL_JOB", "NOTE", "PRIORITY", "CLEAR_PRIORITY"]},
-            "text": {"type": "string"},
-            "target_job_id": {"type": "string", "pattern": SAFE_ID.pattern},
-            "target_source_blob_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
-            "created_unix": {"type": "integer"},
+            "action": {"enum": ["PAUSE", "RESUME", "STOP", "NOTE", "PRIORITY", "CLEAR_PRIORITY"]},
+            "text": {"type": "string"}, "created_unix": {"type": "integer"},
             "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": policy["max_ttl_seconds"]},
         },
         "additionalProperties": True,

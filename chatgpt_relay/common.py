@@ -11,7 +11,7 @@ from typing import Any
 
 APP = "chatgpt-relay"
 PROTOCOL = "CHATGPT_RELAY_V1"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HOME = Path.home()
 CFG_PATH = HOME / ".config" / APP / "config.json"
 DATA_DIR = HOME / ".local" / "share" / APP
@@ -22,6 +22,7 @@ CONTROL_STATE = DATA_DIR / "control-state.json"
 HISTORY = DATA_DIR / "history.jsonl"
 INSTANCE = f"{os.getpid()}-{secrets.token_hex(5)}"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+GIT_BLOB_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 SUPPORTED_OPS = (
     "ping", "shell", "cancel", "control_status", "read_file", "write_file",
     "git_status", "git_diff", "list_files", "artifact_info", "artifact_read", "artifact_tail",
@@ -163,6 +164,15 @@ def validate_freshness(cfg: dict, payload: dict, *, now: int | None = None, kind
     return {"created_unix": created, "ttl_seconds": ttl, "expires_unix": expires}
 
 
+def _validate_optional_blob_sha(value: Any, name: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not GIT_BLOB_SHA.fullmatch(text):
+        raise ValueError(f"{name} must be a 40-character Git blob SHA")
+    return text.lower()
+
+
 def validate_job(cfg: dict, job: dict, *, enforce_freshness=True) -> tuple[str, str, str]:
     if not isinstance(job, dict):
         raise ValueError("job must be a JSON object")
@@ -178,8 +188,14 @@ def validate_job(cfg: dict, job: dict, *, enforce_freshness=True) -> tuple[str, 
     if op == "shell":
         if not isinstance(job.get("cwd"), str) or not job["cwd"]:
             raise ValueError("shell requires cwd")
-        if not isinstance(job.get("command"), str) or not job["command"]:
-            raise ValueError("shell requires command")
+        command = job.get("command")
+        command_b64 = job.get("command_b64")
+        if bool(command) == bool(command_b64):
+            raise ValueError("shell requires exactly one of command or command_b64")
+        if command is not None and (not isinstance(command, str) or not command):
+            raise ValueError("shell command must be a non-empty string")
+        if command_b64 is not None and (not isinstance(command_b64, str) or not command_b64):
+            raise ValueError("shell command_b64 must be a non-empty string")
         if "env" in job and not isinstance(job["env"], dict):
             raise ValueError("shell env must be an object")
         if "timeout" in job and as_int(job["timeout"], "timeout") < 1:
@@ -195,6 +211,7 @@ def validate_job(cfg: dict, job: dict, *, enforce_freshness=True) -> tuple[str, 
     elif op == "cancel":
         target_session = normalize_session(cfg, job.get("target_session") or session)
         normalize_job_id(target_session, job.get("target_job_id"))
+        _validate_optional_blob_sha(job.get("target_source_blob_sha"), "target_source_blob_sha")
     elif op in {"artifact_info", "artifact_read", "artifact_tail"}:
         target_session = normalize_session(cfg, job.get("target_session") or session)
         normalize_job_id(target_session, job.get("target_job_id"))
@@ -218,10 +235,13 @@ def validate_control(cfg: dict, control: dict, *, enforce_freshness=True) -> str
         raise ValueError(f"wrong protocol; expected {PROTOCOL}")
     session = normalize_session(cfg, control.get("session"))
     action = str(control.get("action") or "").upper()
-    if action not in {"PAUSE", "RESUME", "STOP", "NOTE", "PRIORITY", "CLEAR_PRIORITY"}:
+    if action not in {"PAUSE", "RESUME", "STOP", "CANCEL_JOB", "NOTE", "PRIORITY", "CLEAR_PRIORITY"}:
         raise ValueError(f"unsupported control action {action!r}")
     if action in {"NOTE", "PRIORITY"} and not str(control.get("text") or "").strip():
         raise ValueError(f"{action} requires text")
+    if action == "CANCEL_JOB":
+        normalize_job_id(session, control.get("target_job_id"))
+        _validate_optional_blob_sha(control.get("target_source_blob_sha"), "target_source_blob_sha")
     if enforce_freshness:
         validate_freshness(cfg, control, kind="control")
     return session
@@ -245,9 +265,11 @@ def job_schema(cfg: dict | None = None) -> dict:
             "job_id": {"type": "string", "pattern": SAFE_ID.pattern}, "op": {"enum": list(SUPPORTED_OPS)},
             "created_unix": {"type": "integer"},
             "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": policy["max_ttl_seconds"]},
-            "cwd": {"type": "string"}, "command": {"type": "string"}, "timeout": {"type": "integer", "minimum": 1},
+            "cwd": {"type": "string"}, "command": {"type": "string"}, "command_b64": {"type": "string"},
+            "timeout": {"type": "integer", "minimum": 1},
             "env": {"type": "object"}, "path": {"type": "string"}, "content": {"type": "string"},
             "target_session": {"type": "string"}, "target_job_id": {"type": "string"},
+            "target_source_blob_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
             "stream": {"enum": list(ARTIFACT_STREAMS)}, "offset": {"type": "integer", "minimum": 0},
             "max_bytes": {"type": "integer", "minimum": 1}, "lines": {"type": "integer", "minimum": 1},
         },
@@ -263,8 +285,11 @@ def control_schema(cfg: dict | None = None) -> dict:
         "required": ["protocol", "session", "action"] + (["created_unix"] if policy["required_timestamp"] else []),
         "properties": {
             "protocol": {"const": PROTOCOL}, "session": {"type": "string", "pattern": SAFE_ID.pattern},
-            "action": {"enum": ["PAUSE", "RESUME", "STOP", "NOTE", "PRIORITY", "CLEAR_PRIORITY"]},
-            "text": {"type": "string"}, "created_unix": {"type": "integer"},
+            "action": {"enum": ["PAUSE", "RESUME", "STOP", "CANCEL_JOB", "NOTE", "PRIORITY", "CLEAR_PRIORITY"]},
+            "text": {"type": "string"},
+            "target_job_id": {"type": "string", "pattern": SAFE_ID.pattern},
+            "target_source_blob_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+            "created_unix": {"type": "integer"},
             "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": policy["max_ttl_seconds"]},
         },
         "additionalProperties": True,
@@ -279,6 +304,8 @@ def capabilities(cfg: dict) -> dict:
         "reliability": {
             "immutable_queue_blobs": True, "durable_state": "sqlite-wal", "at_most_once_recovery": True,
             "streaming_stdout_stderr": True, "malformed_job_quarantine": True,
+            "serialized_github_mutations": True, "github_retry_backoff": True,
+            "job_scoped_cancel": True, "shell_command_b64": True,
         },
         "freshness": ttl_policy(cfg),
         "limits": {

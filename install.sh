@@ -4,7 +4,7 @@ set -euo pipefail
 SOURCE_REPO="${CHATGPT_RELAY_SOURCE_REPO:-dmorazasanchez/ChatGPT-relay}"
 SOURCE_REF="${CHATGPT_RELAY_REF:-main}"
 SOURCE_BASE="https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_REF}"
-EXPECTED_VERSION="1.2.1"
+EXPECTED_VERSION="1.2.2"
 APP="chatgpt-relay"
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="$HOME/.config/$APP"

@@ -12,6 +12,7 @@ from chatgpt_relay import common
 from chatgpt_relay import github as github_mod
 from chatgpt_relay import runner as runner_mod
 from chatgpt_relay import state as state_mod
+from chatgpt_relay import transport as transport_mod
 
 
 class ReliabilityTests(unittest.TestCase):
@@ -61,8 +62,25 @@ class ReliabilityTests(unittest.TestCase):
         with self.assertRaises(json.JSONDecodeError):
             common.decode_transport_payload(bad)
 
+    def test_poll_jobs_accepts_base64_json_envelope(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self.cfg(td)
+            cfg.update(repo="owner/repo", queue_prefix="relay")
+            sessions = runner_mod.Sessions(cfg)
+            runr = runner_mod.Runner(cfg, sessions)
+            transport = transport_mod.Transport(cfg, runr, sessions)
+            job = self.fresh_job(job_id="env-ping")
+            raw = json.dumps(job)
+            envelope = base64.b64encode(raw.encode("utf-8")).decode("ascii")
+            item = {"name": "default--env-ping.json", "sha": "a" * 40}
+            with mock.patch.object(transport_mod, "gh_list", return_value=[item]),                  mock.patch.object(transport_mod, "gh_get_blob_text", return_value=envelope),                  mock.patch.object(transport, "_publish_queue_manifest"),                  mock.patch.object(transport_mod.threading.Thread, "start", autospec=True):
+                launched = transport.poll_jobs()
+            self.assertEqual(launched, 1)
+            self.assertIn("default--env-ping.json", transport.inflight)
+            self.assertIn("default", transport.claimed)
+
     def test_version_and_capabilities(self):
-        self.assertEqual(common.VERSION, "1.2.1")
+        self.assertEqual(common.VERSION, "1.2.2")
         caps = common.capabilities(self.cfg("/tmp"))
         self.assertTrue(caps["reliability"]["immutable_queue_blobs"])
         self.assertTrue(caps["reliability"]["streaming_stdout_stderr"])

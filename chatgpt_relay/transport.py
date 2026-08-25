@@ -426,8 +426,8 @@ class Transport:
                 malformed.append(record)
                 continue
             try:
-                job = json.loads(raw)
-            except json.JSONDecodeError as exc:
+                job, _payload_encoding = decode_transport_payload(raw)
+            except (json.JSONDecodeError, ValueError) as exc:
                 record = {"filename": filename, "blob_sha": selected_sha, "error": f"{type(exc).__name__}: {exc}"[:500]}
                 try:
                     session, job_id = self._infer_identity(filename)
